@@ -77,6 +77,13 @@ function loadAccounts() {
 }
 
 const accounts = loadAccounts();
+const autoReplyEnabled = /^(1|true|yes)$/i.test(process.env.AUTOREPLY_ENABLED || "false");
+const autoReplyIntervalMs = Math.max(Number(process.env.AUTOREPLY_INTERVAL_MS) || 60_000, 30_000);
+const specialAutoReplyAccount = process.env.AUTOREPLY_SPECIAL_ACCOUNT || "support";
+const genericAutoReplyText = process.env.AUTOREPLY_GENERIC_TEXT ||
+  "شكراً لتواصلكم مع المثاني. تم استلام رسالتكم بنجاح، وسيقوم الفريق المختص بمراجعتها والرد عليكم في أقرب وقت ممكن.\n\nThank you for contacting Almathanie. Your message has been received and our team will respond as soon as possible.";
+const specialAutoReplyText = process.env.AUTOREPLY_SPECIAL_TEXT ||
+  `${genericAutoReplyText}\n\nتم تحويل رسالتكم تلقائياً إلى فريق الدعم والمتابعة. يرجى الاحتفاظ بعنوان هذه الرسالة لتسهيل متابعة طلبكم.\n\nYour message has been routed automatically to the support team. Please keep this subject line for follow-up.`;
 
 app.disable("x-powered-by");
 app.use(helmet());
@@ -159,7 +166,78 @@ function addressText(address) {
   return address.text || "";
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+function firstAddress(address) {
+  return String(address?.value?.[0]?.address || "").trim().toLowerCase();
+}
+
+function headerText(parsed, name) {
+  const value = parsed.headers?.get(name);
+  return Array.isArray(value) ? value.join(", ") : String(value || "");
+}
+
+function canAutoReply(parsed, account) {
+  const sender = firstAddress(parsed.from);
+  if (!sender || !sender.includes("@")) return false;
+  if (sender === account.email.toLowerCase()) return false;
+  if (sender.endsWith("@almathanie.com")) return false;
+  if (/(^|[._+-])(no-?reply|do-?not-?reply|mailer-daemon)([._+-]|@)/i.test(sender)) return false;
+
+  const autoSubmitted = headerText(parsed, "auto-submitted").toLowerCase();
+  if (autoSubmitted && autoSubmitted !== "no") return false;
+  if (/^(bulk|list|junk)/i.test(headerText(parsed, "precedence"))) return false;
+  if (parsed.headers?.has("list-id")) return false;
+  return true;
+}
+
+async function processAutoReplies(account) {
+  await withInbox(account, async (client) => {
+    const unseen = await client.search({ seen: false });
+    for (const uid of unseen.slice(-20)) {
+      const message = await client.fetchOne(uid, { source: true, flags: true }, { uid: true });
+      if (!message?.source || message.flags?.has("\\Answered")) continue;
+
+      const parsed = await simpleParser(message.source);
+      if (!canAutoReply(parsed, account)) continue;
+
+      const recipient = firstAddress(parsed.replyTo) || firstAddress(parsed.from);
+      const subject = String(parsed.subject || "رسالتكم إلى المثاني").slice(0, 280);
+      const text = account.id === specialAutoReplyAccount ? specialAutoReplyText : genericAutoReplyText;
+      await smtpTransport(account).sendMail({
+        from: account.email,
+        to: recipient,
+        subject: /^re:/i.test(subject) ? subject : `Re: ${subject}`,
+        text,
+        inReplyTo: parsed.messageId || undefined,
+        references: parsed.messageId ? [parsed.messageId] : undefined,
+        headers: { "Auto-Submitted": "auto-replied", "X-Auto-Response-Suppress": "All" },
+      });
+      await client.messageFlagsAdd(uid, ["\\Answered"], { uid: true });
+    }
+  });
+}
+
+let autoReplyRunning = false;
+async function runAutoReplyCycle() {
+  if (!autoReplyEnabled || autoReplyRunning) return;
+  autoReplyRunning = true;
+  try {
+    for (const account of accounts.values()) {
+      try {
+        await processAutoReplies(account);
+      } catch (error) {
+        console.error(`Auto-reply failed for ${account.id}:`, error?.message || "Unknown error");
+      }
+    }
+  } finally {
+    autoReplyRunning = false;
+  }
+}
+
+app.get("/health", (_req, res) => res.json({
+  ok: true,
+  autoReply: autoReplyEnabled,
+  specialAutoReplyAccount,
+}));
 app.use("/api", requireApiKey);
 
 app.get("/api/accounts", (_req, res) => {
@@ -283,4 +361,8 @@ app.use((error, _req, res, _next) => {
 
 app.listen(port, () => {
   console.log(`Almathanie Mail bridge listening on port ${port}`);
+  if (autoReplyEnabled) {
+    setTimeout(runAutoReplyCycle, 5_000);
+    setInterval(runAutoReplyCycle, autoReplyIntervalMs);
+  }
 });

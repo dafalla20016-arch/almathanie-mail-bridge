@@ -20,6 +20,33 @@ const allowedOrigins = new Set(
 );
 
 function loadAccounts() {
+  const mailboxIds = (process.env.MAILBOX_IDS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (mailboxIds.length > 0) {
+    const accounts = new Map();
+    for (const id of mailboxIds) {
+      if (!/^[a-z0-9_-]+$/i.test(id) || accounts.has(id)) {
+        throw new Error("Mailbox IDs must be unique and URL-safe");
+      }
+      const prefix = `MAILBOX_${id.toUpperCase().replace(/-/g, "_")}`;
+      const email = process.env[`${prefix}_EMAIL`];
+      const password = process.env[`${prefix}_PASSWORD`];
+      if (!email || !password) {
+        throw new Error(`Missing email or password for mailbox ${id}`);
+      }
+      accounts.set(id, {
+        id,
+        label: process.env[`${prefix}_LABEL`] || id,
+        email,
+        password,
+      });
+    }
+    return accounts;
+  }
+
   let raw;
   try {
     raw = JSON.parse(process.env.MAIL_ACCOUNTS_JSON || "[]");

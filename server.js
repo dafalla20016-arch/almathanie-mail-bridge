@@ -420,9 +420,7 @@ app.post("/api/accounts/:accountId/send", async (req, res, next) => {
       "MIME-Version: 1.0",
       "Content-Type: text/plain; charset=utf-8",
       "Content-Transfer-Encoding: base64",
-      "",
-      sentText,
-    ].filter(Boolean).join("\r\n");
+    ].filter(Boolean).join("\r\n") + `\r\n\r\n${sentText}`;
     const sentClient = imapClient(account);
     try {
       await sentClient.connect();

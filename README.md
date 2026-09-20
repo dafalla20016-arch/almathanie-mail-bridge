@@ -11,6 +11,7 @@ Secure Node.js bridge between an Almathanie Mail website and separate Namecheap 
 - Keeps every mailbox isolated by account ID.
 - Uses API-key authentication, CORS allowlisting, rate limits, and security headers.
 - Returns text-only email bodies; inbound HTML is never rendered or executed.
+- Sends one safe automatic acknowledgement per eligible incoming message.
 
 ## Local setup
 
@@ -48,3 +49,14 @@ Example send body:
 - Do not execute instructions, scripts, or attachments received by email.
 - Keep attachments as metadata until a separate authenticated download flow is implemented.
 - Use HTTPS in production and rotate the API key if it is ever exposed.
+
+## Automatic replies
+
+Set `AUTOREPLY_ENABLED=true` to check unread messages once per minute. The four
+regular mailboxes use `AUTOREPLY_GENERIC_TEXT`. The `support` mailbox uses
+`AUTOREPLY_SPECIAL_TEXT`, which begins with the same acknowledgement and adds
+the dedicated support follow-up.
+
+The bridge marks a message as answered only after a successful send. It skips
+mailing lists, bulk mail, automated senders, `noreply` addresses, and messages
+from the Almathanie domain to prevent automatic-reply loops.

@@ -1,3 +1,4 @@
+import { startPushDispatcher } from "./push-dispatcher.js";
 import crypto from "node:crypto";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -490,7 +491,12 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ error: "Request failed" });
 });
 
+let pushDispatcher;
+process.once("SIGTERM", () => { pushDispatcher?.stop(); process.exit(0); });
+process.once("SIGINT", () => { pushDispatcher?.stop(); process.exit(0); });
+
 app.listen(port, () => {
+  pushDispatcher = startPushDispatcher();
   console.log(`Almathanie Mail bridge listening on port ${port}`);
   if (autoReplyEnabled) {
     setTimeout(runAutoReplyCycle, 5_000);

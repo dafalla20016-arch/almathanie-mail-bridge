@@ -355,11 +355,15 @@ app.get("/api/accounts/:accountId/messages/:uid", async (req, res, next) => {
     const result = await withMailbox(account, folder, async (client) => {
       const message = await client.fetchOne(uid, { source: true }, { uid: true });
       if (!message?.source) return null;
-      await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
+      if(req.query.peek !== "1") await client.messageFlagsAdd(uid, ["\\Seen"], { uid: true });
       const parsed = await simpleParser(message.source);
       return {
         uid,
         messageId: parsed.messageId || null,
+        automationMetadataVersion: 1,
+        autoSubmitted: headerText(parsed,"auto-submitted"),
+        precedence: headerText(parsed,"precedence"),
+        headers: Object.fromEntries(["auto-submitted","precedence","x-auto-response-suppress","x-autoreply","x-autorespond","list-id","content-type"].filter(name=>parsed.headers?.has(name)).map(name=>[name,headerText(parsed,name)])),
         subject: parsed.subject || "(No subject)",
         from: addressText(parsed.from),
         to: addressText(parsed.to),

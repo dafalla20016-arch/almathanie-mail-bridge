@@ -1,3 +1,4 @@
+import { DELIVERY_VERSION, DeliveryError, deliverMessage, createSendHandler } from "./mail-delivery.js";
 import { startPushDispatcher } from "./push-dispatcher.js";
 import crypto from "node:crypto";
 import cors from "cors";
@@ -95,10 +96,10 @@ app.use(
       return callback(new Error("Origin not allowed"));
     },
     methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "X-API-Key"],
+    allowedHeaders: ["Content-Type", "X-API-Key", "X-Idempotency-Key"],
   }),
 );
-app.use(express.json({ limit: "64kb" }));
+
 app.use(
   rateLimit({
     windowMs: 60_000,
@@ -138,10 +139,17 @@ function imapClient(account) {
 }
 
 function smtpTransport(account) {
+  const smtpPort = Number(process.env.SMTP_PORT || 465);
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST || "mail.privateemail.com",
-    port: Number(process.env.SMTP_PORT || 465),
-    secure: true,
+    port: smtpPort,
+    secure: smtpPort === 465,
+    requireTLS: smtpPort !== 465,
+    connectionTimeout: 8_000,
+    greetingTimeout: 8_000,
+    socketTimeout: 20_000,
+    disableFileAccess: true,
+    disableUrlAccess: true,
     auth: { user: account.email, pass: account.password },
   });
 }
@@ -281,10 +289,11 @@ async function runAutoReplyCycle() {
 
 app.get("/health", (_req, res) => res.json({
   ok: true,
+  deliveryVersion: DELIVERY_VERSION,
   autoReply: autoReplyEnabled,
   specialAutoReplyAccount,
 }));
-app.use("/api", requireApiKey);
+app.use("/api", requireApiKey, express.json({ limit: "36mb" }));
 
 app.get("/api/accounts", (_req, res) => {
   res.json(
@@ -396,50 +405,38 @@ app.get("/api/accounts/:accountId/messages/:uid/attachments/:index", async (req,
   }
 });
 
+const sendOnce = createSendHandler({
+  send: (account, body) => deliverMessage({
+    account, body, transport: smtpTransport(account),
+    saveSent: async raw => {
+      const client = imapClient(account);
+      const timer = setTimeout(() => client.close(), 12_000);
+      try {
+        await client.connect();
+        const sentFolder = await resolveFolder(client, "sent");
+        // Never put a sent copy in INBOX when a Sent folder was not found.
+        if (sentFolder === "INBOX") throw new Error("Sent folder unavailable");
+        await client.append(sentFolder, raw, ["\\Seen"]);
+      } finally {
+        clearTimeout(timer);
+        client.close();
+      }
+    },
+  }),
+});
+
 app.post("/api/accounts/:accountId/send", async (req, res, next) => {
   const account = getAccount(req, res);
   if (!account) return;
-  const { to, cc, subject, text, replyTo, inReplyTo, references } = req.body || {};
-  if (!to || !subject || !text) {
-    return res.status(400).json({ error: "to, subject, and text are required" });
-  }
-
   try {
-    const info = await smtpTransport(account).sendMail({
-      from: account.email,
-      to,
-      cc: cc || undefined,
-      replyTo: replyTo || undefined,
-      subject: String(subject).slice(0, 300),
-      text: String(text).slice(0, 100_000),
-      inReplyTo: inReplyTo || undefined,
-      references: Array.isArray(references) ? references : undefined,
+    const result = await sendOnce(account, req.body || {}, req.get("X-Idempotency-Key"));
+    console.info("SMTP submission", {
+      account: account.id, messageId: result.messageId, status: result.deliveryStatus,
+      accepted: result.accepted.length, rejected: result.rejected.length,
+      sentCopySaved: result.sentCopySaved,
     });
-    const sentSubject = String(subject).replace(/[\r\n]/g, " ").slice(0, 300);
-    const sentText = Buffer.from(String(text).slice(0, 100_000), "utf8").toString("base64");
-    const sentRaw = [
-      `From: ${account.email}`,
-      `To: ${String(to).replace(/[\r\n]/g, " ")}`,
-      cc ? `Cc: ${String(cc).replace(/[\r\n]/g, " ")}` : "",
-      `Subject: ${sentSubject}`,
-      `Message-ID: ${info.messageId}`,
-      `Date: ${new Date().toUTCString()}`,
-      "MIME-Version: 1.0",
-      "Content-Type: text/plain; charset=utf-8",
-      "Content-Transfer-Encoding: base64",
-    ].filter(Boolean).join("\r\n") + `\r\n\r\n${sentText}`;
-    const sentClient = imapClient(account);
-    try {
-      await sentClient.connect();
-      const sentFolder = await resolveFolder(sentClient, "sent");
-      await sentClient.append(sentFolder, sentRaw, ["\\Seen"]);
-    } finally {
-      await sentClient.logout().catch(() => {});
-    }
-    res.status(201).json({ ok: true, messageId: info.messageId });
-  } catch (error) {
-    next(error);
-  }
+    res.status(201).json(result);
+  } catch (error) { next(error); }
 });
 
 app.patch("/api/accounts/:accountId/messages/:uid", async (req, res, next) => {
@@ -493,8 +490,14 @@ app.delete("/api/accounts/:accountId/messages/:uid", async (req, res, next) => {
 });
 
 app.use((error, _req, res, _next) => {
-  console.error("Request failed", error?.message || "Unknown error");
-  res.status(500).json({ error: "Request failed" });
+  if (error?.type === "entity.too.large") return res.status(413).json({ error: "Attachments exceed the request size limit", code: "MESSAGE_TOO_LARGE", deliveryStatus: "failed" });
+  if (error?.type === "entity.parse.failed") return res.status(400).json({ error: "Invalid JSON", code: "INVALID_MESSAGE", deliveryStatus: "failed" });
+  if (error instanceof DeliveryError) {
+    console.error("Mail submission failed", { code: error.code, status: error.deliveryStatus });
+    return res.status(error.status).json({ error: error.message, code: error.code, deliveryStatus: error.deliveryStatus });
+  }
+  console.error("Request failed", error?.code || "Unknown error");
+  res.status(500).json({ error: "Request failed", code: "BRIDGE_REQUEST_FAILED" });
 });
 
 let pushDispatcher;

@@ -203,7 +203,13 @@ async function withMailbox(account, requested, work) {
 function addressText(address) {
   if (!address) return "";
   if (typeof address === "string") return address;
-  return address.text || "";
+  // ImapFlow envelopes contain arrays; Mailparser uses { text, value }.
+  if (Array.isArray(address)) return address.map(addressText).filter(Boolean).join(", ");
+  if (typeof address.text === "string" && address.text) return address.text;
+  if (Array.isArray(address.value)) return addressText(address.value);
+  const email = String(address.address || "").replace(/[\r\n<>]/g, "").trim();
+  const name = String(address.name || "").replace(/[\r\n<>]/g, " ").trim();
+  return email ? (name ? `${name} <${email}>` : email) : name;
 }
 
 function firstAddress(address) {

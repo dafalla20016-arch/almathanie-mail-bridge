@@ -41,7 +41,7 @@ export function startPushDispatcher({
       cancel(timeout);
       controller = undefined;
       // Schedule only after completion; no overlapping local requests.
-      if (!stopped) timer = schedule(tick, 60000);
+      if (!stopped) timer = schedule(tick, 15000);
     }
   }
   log.info('Push scheduler enabled');

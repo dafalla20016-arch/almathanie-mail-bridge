@@ -325,6 +325,7 @@ app.get("/api/accounts/:accountId/messages", async (req, res, next) => {
       })) {
         rows.push({
           uid: message.uid,
+          messageId: message.envelope?.messageId || null,
           subject: message.envelope?.subject || "(No subject)",
           from: addressText(message.envelope?.from),
           to: addressText(message.envelope?.to),

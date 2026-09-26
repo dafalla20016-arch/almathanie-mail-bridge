@@ -1,8 +1,9 @@
+import { submitTracked } from "./resend-delivery.js";
 import crypto from "node:crypto";
 import nodemailer from "nodemailer";
 import addressparser from "nodemailer/lib/addressparser/index.js";
 
-export const DELIVERY_VERSION = "2026-09-26.1";
+export const DELIVERY_VERSION = "2026-09-26.2";
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 export class DeliveryError extends Error {
@@ -74,7 +75,10 @@ export async function deliverMessage({ account, body, transport, saveSent }) {
   const prepared = await prepareMessage(account, body);
   let info;
   try {
-    info = await transport.sendMail({
+    if (body.provider === "resend" && !/^[a-f0-9]{64}$/.test(body.trackingKey || "")) throw new DeliveryError("INVALID_MESSAGE", "Invalid tracking key");
+    info = body.provider === "resend"
+      ? await submitTracked({ prepared, account, body, apiKey: process.env.RESEND_MAIL_API_KEY })
+      : await transport.sendMail({
       envelope: prepared.envelope, raw: prepared.raw,
       dsn: { id: prepared.messageId, return: "headers", notify: ["failure", "delay"] },
       disableFileAccess: true, disableUrlAccess: true,
@@ -97,6 +101,7 @@ export async function deliverMessage({ account, body, transport, saveSent }) {
     ok: true, deliveryVersion: DELIVERY_VERSION,
     deliveryStatus: notAccepted.length ? "partial" : "accepted",
     messageId: prepared.messageId, accepted, rejected: notAccepted,
+    ...(info.providerId ? { provider: "resend", providerId: info.providerId } : {}),
     smtpCode: Number(String(info.response).slice(0, 3)), sentCopySaved: false,
   };
   // SMTP acceptance is final for this attempt. A failure to save its IMAP copy
